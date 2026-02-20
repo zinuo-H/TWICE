@@ -1,0 +1,72 @@
+---
+output:
+  github_document:
+    html_preview: false
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  cache = TRUE,
+  fig.path = "man/figures/README-",
+  out.width = "100%",
+  dpi = 300
+)
+devtools::load_all("~/Documents/R/GRSA/ReporterScore/")
+library(badger)
+```
+
+
+# TWICE
+
+<!-- badges: start -->
+<!-- badges: end -->
+
+A New Enrichment Method for Exposomics: Topology-Weighted Integrated Correlation Enrichment (TWICE) Analysis
+
+The goal of TWiCE is to combine the key strengths of existing approaches:
+1. Effectively utilize correlation values, similar to Functional Class Scoring (FCS) methods, so that genes with stronger correlations contribute more to the pathway score.
+2. Incorporate pathway topology information, as in Pathway Topology-based (PT) methods, to assign greater weights to biologically important genes such as upstream or highly connected nodes.
+In this way, TWiCE bridges the gap between correlation analysis and functional enrichment, providing a more biologically meaningful interpretation of exposome-omics data.
+
+## Installation
+
+You can install the released version of `TWICE` from [CRAN](https://CRAN.R-project.org) with:
+
+``` r
+install.packages("TWICE")
+```
+
+You can install the development version of `TWICE` from [GitHub](https://github.com/) with:
+
+``` r
+# install.packages("devtools")
+devtools::install_github("Asa12138/pcutils")
+devtools::install_github("Asa12138/TWICE")
+```
+
+## Example
+
+This is a basic example:
+
+```{r example}
+library(TWICE)
+## basic example code
+load_all_pathway_NS() -> all_pathway_NS
+# Generate an example data box
+cor_df <- data.frame(
+  name = all_pathway_NS$name,
+  cor = runif(nrow(all_pathway_NS), 0, 1)
+)
+cor_df <- dplyr::sample_n(cor_df, 200)
+
+calculate_TWICE(all_pathway_NS, cor_df, mode = ) -> res
+
+head(res)
+
+
+```
+
