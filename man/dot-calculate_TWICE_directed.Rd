@@ -12,14 +12,25 @@
   perm,
   parallel,
   cores,
-  min_exist_KO,
-  max_exist_KO
+  min_exist_KO = 5,
+  max_exist_KO = 600
 )
 }
 \value{
+Data frame with TWiCE scores for directed mode
+
 Data frame with TWiCE scores for directed mode
 }
 \description{
 Internal function for calculating TWiCE scores in 'directed' mode
 }
+\keyword{'directed'}
+\keyword{Internal}
+\keyword{TWiCE}
+\keyword{calculating}
+\keyword{for}
+\keyword{function}
+\keyword{in}
 \keyword{internal}
+\keyword{mode}
+\keyword{scores}

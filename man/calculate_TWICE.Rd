@@ -13,8 +13,8 @@ calculate_TWICE(
   spearate_res = FALSE,
   perm = 999,
   parallel = TRUE,
-  cores = 8,
-  min_exist_KO = 1,
+  cores = 4,
+  min_exist_KO = 5,
   max_exist_KO = 600
 )
 }

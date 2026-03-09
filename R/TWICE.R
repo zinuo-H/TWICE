@@ -46,8 +46,8 @@ calculate_TWICE <- function(all_NS_res, cor_df,
                             spearate_res = FALSE,
                             perm = 999,
                             parallel = TRUE,
-                            cores = 8,
-                            min_exist_KO = 1, max_exist_KO = 600) {
+                            cores = 4,
+                            min_exist_KO = 5, max_exist_KO = 600) {
   # Validate input parameters
   stopifnot(mode %in% c("directed", "mixed", "separate"))
   stopifnot(is.logical(parallel))
@@ -122,61 +122,64 @@ calculate_TWICE <- function(all_NS_res, cor_df,
 .calculate_TWICE_separate <- function(all_NS_res, cor_df, unique_paths,
                                       p.adjust.method, spearate_res,
                                       perm, parallel, cores,
-                                      min_exist_KO, max_exist_KO) {
-  # Declare variable names to avoid R CMD check notes
+                                      min_exist_KO, max_exist_KO) { # 没有 min_coverage
   name <- Pathway_id <- NS <- W_pos <- W_neg <- cor <- NULL
 
-  # Prepare correlation pools for positive and negative correlations
+
+  # 1. 自适应稳健修剪方差 (Adaptive Trimmed Variance via IQR)
+  # 使用 Tukey 的 1.5*IQR 法则动态识别并剔除真实的生物学极值信号
+
   cor_pool_pos <- cor_df$cor[cor_df$cor > 0]
   cor_pool_neg <- cor_df$cor[cor_df$cor < 0]
-  pool_ns <- all_NS_res$NS
 
-  # Main computation function for a single pathway
+  # --- 处理正向池 ---
+  Q1_pos <- quantile(cor_pool_pos, 0.25, na.rm = TRUE)
+  Q3_pos <- quantile(cor_pool_pos, 0.75, na.rm = TRUE)
+  IQR_pos <- Q3_pos - Q1_pos
+  # 设定正向信号上限阈值
+  upper_bound_pos <- Q3_pos + 1.5 * IQR_pos
+
+  # 只保留低于上限的纯背景噪音
+  bg_pos <- cor_pool_pos[cor_pool_pos <= upper_bound_pos]
+  mu_W_pos <- mean(bg_pos, na.rm = TRUE)
+  var_W_pos <- var(bg_pos, na.rm = TRUE)
+
+  # --- 处理负向池 ---
+  Q1_neg <- quantile(cor_pool_neg, 0.25, na.rm = TRUE)
+  Q3_neg <- quantile(cor_pool_neg, 0.75, na.rm = TRUE)
+  IQR_neg <- Q3_neg - Q1_neg
+  # 设定负向信号下限阈值 (因为全是负数，越小越极端)
+  lower_bound_neg <- Q1_neg - 1.5 * IQR_neg
+
+  # 只保留高于下限的纯背景噪音
+  bg_neg <- cor_pool_neg[cor_pool_neg >= lower_bound_neg]
+  mu_W_neg <- mean(bg_neg, na.rm = TRUE)
+  var_W_neg <- var(bg_neg, na.rm = TRUE)
+
   compute_pathway <- function(path) {
-    NS_res <- dplyr::filter(all_NS_res, Pathway_id == path) %>%
-      dplyr::select(name, NS)
+    NS_res <- dplyr::filter(all_NS_res, Pathway_id == path) %>% dplyr::select(name, NS)
     tmp_K_num <- nrow(NS_res)
 
-    # Identify mapped KOs for positive and negative correlations
     path_name_vec <- unique(unlist(strsplit(NS_res$name, " ")))
     cor_name_vec_pos <- unique(cor_df$name[!is.na(cor_df$cor) & cor_df$cor > 0])
     cor_name_vec_neg <- unique(cor_df$name[!is.na(cor_df$cor) & cor_df$cor < 0])
+
     mapped_names_pos <- intersect(path_name_vec, cor_name_vec_pos)
     mapped_names_neg <- intersect(path_name_vec, cor_name_vec_neg)
-    mapped_names_str_pos <- if (length(mapped_names_pos) > 0) {
-      paste(mapped_names_pos, collapse = "|")
-    } else {
-      NA_character_
-    }
-    mapped_names_str_neg <- if (length(mapped_names_neg) > 0) {
-      paste(mapped_names_neg, collapse = "|")
-    } else {
-      NA_character_
-    }
+    mapped_names_str_pos <- if (length(mapped_names_pos) > 0) paste(mapped_names_pos, collapse = "|") else NA_character_
+    mapped_names_str_neg <- if (length(mapped_names_neg) > 0) paste(mapped_names_neg, collapse = "|") else NA_character_
 
-    ## --- Step A: Node aggregation ---
     node_scores <- lapply(seq_len(nrow(NS_res)), function(j) {
-      node_name <- NS_res$name[j]
-      node_ns <- NS_res$NS[j]
-      gene_list <- unlist(strsplit(node_name, " "))
+      gene_list <- unlist(strsplit(NS_res$name[j], " "))
       cor_sub <- cor_df[cor_df$name %in% gene_list, , drop = FALSE]
-
       if (nrow(cor_sub) == 0) {
         return(data.frame(W_pos = NA, W_neg = NA, NS = NA))
       }
 
-      W_pos <- if (any(cor_sub$cor > 0, na.rm = TRUE)) {
-        mean(cor_sub$cor[cor_sub$cor > 0], na.rm = TRUE)
-      } else {
-        NA
-      }
-      W_neg <- if (any(cor_sub$cor < 0, na.rm = TRUE)) {
-        mean(cor_sub$cor[cor_sub$cor < 0], na.rm = TRUE)
-      } else {
-        NA
-      }
+      W_pos <- if (any(cor_sub$cor > 0, na.rm = TRUE)) mean(cor_sub$cor[cor_sub$cor > 0], na.rm = TRUE) else NA
+      W_neg <- if (any(cor_sub$cor < 0, na.rm = TRUE)) mean(cor_sub$cor[cor_sub$cor < 0], na.rm = TRUE) else NA
 
-      data.frame(W_pos = W_pos, W_neg = W_neg, NS = node_ns)
+      data.frame(W_pos = W_pos, W_neg = W_neg, NS = NS_res$NS[j])
     }) %>%
       dplyr::bind_rows() %>%
       filter(!(is.na(W_pos) & is.na(W_neg)))
@@ -184,61 +187,53 @@ calculate_TWICE <- function(all_NS_res, cor_df,
     tmp_exist_K_num_pos <- sum(!is.na(node_scores$W_pos))
     tmp_exist_K_num_neg <- sum(!is.na(node_scores$W_neg))
 
-    # Initialize result variables
     S_mean_pos <- S_sum_pos <- p_mean_pos <- NA_real_
     S_mean_neg <- S_sum_neg <- p_mean_neg <- NA_real_
 
-    # --- Step B: Calculate positive pathway score ---
+    # --- Z-score for Positive correlations ---
+    # 仅使用 min_exist_KO 进行过滤
     if (tmp_exist_K_num_pos >= min_exist_KO & tmp_exist_K_num_pos <= max_exist_KO) {
-      S_mean_pos <- mean(node_scores$W_pos * node_scores$NS, na.rm = TRUE)
-      S_sum_pos <- S_mean_pos * tmp_exist_K_num_pos
+      valid_nodes_pos <- node_scores[!is.na(node_scores$W_pos), ]
+      S_mean_pos <- mean(valid_nodes_pos$W_pos * valid_nodes_pos$NS, na.rm = TRUE)
+      S_sum_pos <- sum(valid_nodes_pos$W_pos * valid_nodes_pos$NS, na.rm = TRUE)
 
-      null_mean_pos <- replicate(perm, {
-        perm_ns <- sample(pool_ns, tmp_exist_K_num_pos, replace = TRUE)
-        perm_cor <- sample(cor_pool_pos, tmp_exist_K_num_pos, replace = TRUE)
-        mean(perm_ns * perm_cor, na.rm = TRUE)
-      })
-      if (!is.na(sd(null_mean_pos)) && sd(null_mean_pos) > 0) {
-        p_mean_pos <- (sum(null_mean_pos >= S_mean_pos, na.rm = TRUE) + 1) / (perm + 1)
+      mu_null_pos <- mu_W_pos * sum(valid_nodes_pos$NS)
+      # 不除以 k_i，保留节点内基因的共表达特性
+      var_null_pos <- var_W_pos * sum(valid_nodes_pos$NS^2)
+      sigma_null_pos <- sqrt(var_null_pos)
+
+      if (!is.na(sigma_null_pos) && sigma_null_pos > 0) {
+        Z_pos <- (S_sum_pos - mu_null_pos) / sigma_null_pos
+        p_mean_pos <- pnorm(Z_pos, lower.tail = FALSE)
       }
     }
 
-    # --- Step C: Calculate negative pathway score ---
+    # --- Z-score for Negative correlations ---
     if (tmp_exist_K_num_neg >= min_exist_KO & tmp_exist_K_num_neg <= max_exist_KO) {
-      S_mean_neg <- mean(node_scores$W_neg * node_scores$NS, na.rm = TRUE)
-      S_sum_neg <- S_mean_neg * tmp_exist_K_num_neg
+      valid_nodes_neg <- node_scores[!is.na(node_scores$W_neg), ]
+      S_mean_neg <- mean(valid_nodes_neg$W_neg * valid_nodes_neg$NS, na.rm = TRUE)
+      S_sum_neg <- sum(valid_nodes_neg$W_neg * valid_nodes_neg$NS, na.rm = TRUE)
 
-      null_mean_neg <- replicate(perm, {
-        perm_ns <- sample(pool_ns, tmp_exist_K_num_neg, replace = TRUE)
-        perm_cor <- sample(cor_pool_neg, tmp_exist_K_num_neg, replace = TRUE)
-        mean(perm_ns * perm_cor, na.rm = TRUE)
-      })
-      if (!is.na(sd(null_mean_neg)) && sd(null_mean_neg) > 0) {
-        p_mean_neg <- (sum(null_mean_neg <= S_mean_neg, na.rm = TRUE) + 1) / (perm + 1)
+      mu_null_neg <- mu_W_neg * sum(valid_nodes_neg$NS)
+      var_null_neg <- var_W_neg * sum(valid_nodes_neg$NS^2)
+      sigma_null_neg <- sqrt(var_null_neg)
+
+      if (!is.na(sigma_null_neg) && sigma_null_neg > 0) {
+        Z_neg <- (S_sum_neg - mu_null_neg) / sigma_null_neg
+        p_mean_neg <- pnorm(Z_neg, lower.tail = TRUE)
       }
     }
 
-    # --- Step D: Return results ---
     data.frame(
-      Pathway_id = path,
-      K_num = tmp_K_num,
-      Exist_K_num_pos = tmp_exist_K_num_pos,
-      Exist_K_pos = mapped_names_str_pos,
-      S_mean_pos = S_mean_pos,
-      S_sum_pos = S_sum_pos,
-      p_pos = p_mean_pos,
-      p_pos_adjust = NA_real_,
-      Exist_K_num_neg = tmp_exist_K_num_neg,
-      Exist_K_neg = mapped_names_str_neg,
-      S_mean_neg = S_mean_neg,
-      S_sum_neg = S_sum_neg,
-      p_neg = p_mean_neg,
-      p_neg_adjust = NA_real_,
+      Pathway_id = path, K_num = tmp_K_num,
+      Exist_K_num_pos = tmp_exist_K_num_pos, Exist_K_pos = mapped_names_str_pos,
+      S_mean_pos = S_mean_pos, S_sum_pos = S_sum_pos, p_pos = p_mean_pos, p_pos_adjust = NA_real_,
+      Exist_K_num_neg = tmp_exist_K_num_neg, Exist_K_neg = mapped_names_str_neg,
+      S_mean_neg = S_mean_neg, S_sum_neg = S_sum_neg, p_neg = p_mean_neg, p_neg_adjust = NA_real_,
       stringsAsFactors = FALSE
     )
   }
 
-  # Run computation (with optional parallelization)
   if (parallel) {
     pcutils::lib_ps("parallel")
     TWCE_scores_list <- parallel::mclapply(unique_paths, compute_pathway, mc.cores = cores)
@@ -248,58 +243,36 @@ calculate_TWICE <- function(all_NS_res, cor_df,
 
   TWCE_scores <- dplyr::bind_rows(TWCE_scores_list)
 
-  # Ensure all required columns exist before p-value adjustment
   required_cols <- c(
     "Pathway_id", "K_num", "Exist_K_num_pos", "Exist_K_pos", "S_mean_pos", "S_sum_pos",
     "p_pos", "p_pos_adjust", "Exist_K_num_neg", "Exist_K_neg", "S_mean_neg", "S_sum_neg",
     "p_neg", "p_neg_adjust"
   )
-
   for (cn in required_cols) {
-    if (!cn %in% names(TWCE_scores)) {
-      TWCE_scores[[cn]] <- NA_real_
-    }
+    if (!cn %in% names(TWCE_scores)) TWCE_scores[[cn]] <- NA_real_
   }
 
-  # Adjust p-values
+  # 2. 独立 FDR 矫正 (R 语言 p.adjust 会自动剔除 NA)
+
   TWCE_scores$p_pos_adjust <- p.adjust(TWCE_scores$p_pos, method = p.adjust.method)
   TWCE_scores$p_neg_adjust <- p.adjust(TWCE_scores$p_neg, method = p.adjust.method)
 
-  # Format output based on spearate_res parameter
   if (spearate_res) {
     return(TWCE_scores)
   } else {
-    Exist_K_num_pos <- Exist_K_pos <- S_mean_pos <- S_sum_pos <- p_pos <- p_pos_adjust <-
+    Exist_K_num_pos <- Exist_K_pos <- S_mean_pos <- S_sum_pos <- p_pos <- p_pos_adjust <- S_mean <-
       Exist_K_num_neg <- Exist_K_neg <- S_mean_neg <- S_sum_neg <- p_neg <- p_neg_adjust <- NULL
     TWCE_scores_pos <- TWCE_scores %>%
-      dplyr::select(dplyr::any_of(c(
-        "Pathway_id", "K_num", "Exist_K_num_pos", "Exist_K_pos",
-        "S_mean_pos", "S_sum_pos", "p_pos", "p_pos_adjust"
-      ))) %>%
-      dplyr::rename(
-        Exist_K_num = Exist_K_num_pos,
-        Exist_K = Exist_K_pos,
-        S_mean = S_mean_pos,
-        S_sum = S_sum_pos,
-        p_value = p_pos,
-        p_adjust = p_pos_adjust
-      ) %>%
-      dplyr::mutate(Direction = "Positive")
+      dplyr::select(dplyr::any_of(c("Pathway_id", "K_num", "Exist_K_num_pos", "Exist_K_pos", "S_mean_pos", "S_sum_pos", "p_pos", "p_pos_adjust"))) %>%
+      dplyr::rename(Exist_K_num = Exist_K_num_pos, Exist_K = Exist_K_pos, S_mean = S_mean_pos, S_sum = S_sum_pos, p_value = p_pos, p_adjust = p_pos_adjust) %>%
+      dplyr::mutate(Direction = "Positive") %>%
+      dplyr::filter(!is.na(S_mean))
 
     TWCE_scores_neg <- TWCE_scores %>%
-      dplyr::select(dplyr::any_of(c(
-        "Pathway_id", "K_num", "Exist_K_num_neg", "Exist_K_neg",
-        "S_mean_neg", "S_sum_neg", "p_neg", "p_neg_adjust"
-      ))) %>%
-      dplyr::rename(
-        Exist_K_num = Exist_K_num_neg,
-        Exist_K = Exist_K_neg,
-        S_mean = S_mean_neg,
-        S_sum = S_sum_neg,
-        p_value = p_neg,
-        p_adjust = p_neg_adjust
-      ) %>%
-      dplyr::mutate(Direction = "Negative")
+      dplyr::select(dplyr::any_of(c("Pathway_id", "K_num", "Exist_K_num_neg", "Exist_K_neg", "S_mean_neg", "S_sum_neg", "p_neg", "p_neg_adjust"))) %>%
+      dplyr::rename(Exist_K_num = Exist_K_num_neg, Exist_K = Exist_K_neg, S_mean = S_mean_neg, S_sum = S_sum_neg, p_value = p_neg, p_adjust = p_neg_adjust) %>%
+      dplyr::mutate(Direction = "Negative") %>%
+      dplyr::filter(!is.na(S_mean))
 
     return(dplyr::bind_rows(TWCE_scores_pos, TWCE_scores_neg))
   }
@@ -310,91 +283,87 @@ calculate_TWICE <- function(all_NS_res, cor_df,
 #'
 #' @return Data frame with TWiCE scores for directed mode
 #' @keywords internal
+#' Internal function for calculating TWiCE scores in 'directed' mode
+#'
+#' @return Data frame with TWiCE scores for directed mode
+#' @keywords internal
 .calculate_TWICE_directed <- function(all_NS_res, cor_df, unique_paths,
                                       p.adjust.method, perm, parallel, cores,
-                                      min_exist_KO, max_exist_KO) {
-  # Declare variable names to avoid R CMD check notes
+                                      min_exist_KO = 5, max_exist_KO = 600) { # 默认设为 5
   name <- Pathway_id <- NS <- W <- cor <- NULL
 
-  # Prepare correlation pool (preserving signs)
-  cor_pool <- cor_df$cor
-  pool_ns <- all_NS_res$NS
+  # 1. 自适应稳健修剪方差 (Adaptive Trimmed Variance via IQR)
+  # Directed 模式包含正负值，因此需要同时修剪上下限极值 (双尾)
 
-  # Main computation function for a single pathway
+  cor_pool <- cor_df$cor
+
+  Q1 <- quantile(cor_pool, 0.25, na.rm = TRUE)
+  Q3 <- quantile(cor_pool, 0.75, na.rm = TRUE)
+  IQR_val <- Q3 - Q1
+
+  lower_bound <- Q1 - 1.5 * IQR_val
+  upper_bound <- Q3 + 1.5 * IQR_val
+
+  # 仅提取落在上下限之间的稳健背景噪音
+  bg_cor <- cor_pool[cor_pool >= lower_bound & cor_pool <= upper_bound]
+  mu_W <- mean(bg_cor, na.rm = TRUE)
+  var_W <- var(bg_cor, na.rm = TRUE)
+
   compute_pathway <- function(path) {
-    NS_res <- dplyr::filter(all_NS_res, Pathway_id == path) %>%
-      dplyr::select(name, NS)
+    NS_res <- dplyr::filter(all_NS_res, Pathway_id == path) %>% dplyr::select(name, NS)
     tmp_K_num <- nrow(NS_res)
 
-    # Identify mapped KOs
     path_name_vec <- unique(unlist(strsplit(NS_res$name, " ")))
     cor_name_vec <- unique(cor_df$name[!is.na(cor_df$cor)])
     mapped_names <- intersect(path_name_vec, cor_name_vec)
-    mapped_names_str <- if (length(mapped_names) > 0) {
-      paste(mapped_names, collapse = "|")
-    } else {
-      NA_character_
-    }
+    mapped_names_str <- if (length(mapped_names) > 0) paste(mapped_names, collapse = "|") else NA_character_
 
-    ## --- Step A: Node aggregation ---
     node_scores <- lapply(seq_len(nrow(NS_res)), function(j) {
-      node_name <- NS_res$name[j]
-      node_ns <- NS_res$NS[j]
-      gene_list <- unlist(strsplit(node_name, " "))
+      gene_list <- unlist(strsplit(NS_res$name[j], " "))
       cor_sub <- cor_df[cor_df$name %in% gene_list, , drop = FALSE]
-
       if (nrow(cor_sub) == 0) {
         return(data.frame(W = NA, NS = NA))
       }
 
-      W <- mean(cor_sub$cor, na.rm = TRUE)
-      data.frame(W = W, NS = node_ns)
+      data.frame(W = mean(cor_sub$cor, na.rm = TRUE), NS = NS_res$NS[j])
     }) %>%
       dplyr::bind_rows() %>%
       filter(!is.na(W))
 
     tmp_exist_K_num <- nrow(node_scores)
-
-    # Initialize result variables
     S_mean <- S_sum <- p_mean <- NA_real_
 
-    # --- Step B: Calculate pathway score ---
+    # --- Z-score 参数化检验核心 ---
+    # 严格应用 min_exist_KO 过滤，过滤掉的通路 p_mean 保持为 NA
     if (tmp_exist_K_num >= min_exist_KO & tmp_exist_K_num <= max_exist_KO) {
-      S_mean <- mean(node_scores$W * node_scores$NS, na.rm = TRUE)
-      S_sum <- S_mean * tmp_exist_K_num
+      valid_nodes <- node_scores
+      S_mean <- mean(valid_nodes$W * valid_nodes$NS, na.rm = TRUE)
+      S_sum <- sum(valid_nodes$W * valid_nodes$NS, na.rm = TRUE)
 
-      # Null distribution generation
-      null_mean <- replicate(perm, {
-        perm_ns <- sample(pool_ns, tmp_exist_K_num, replace = TRUE)
-        perm_cor <- sample(cor_pool, tmp_exist_K_num, replace = TRUE)
-        mean(perm_ns * perm_cor, na.rm = TRUE)
-      })
+      # 理论零分布的期望与方差
+      mu_null <- mu_W * sum(valid_nodes$NS)
+      # 不除以 k_i，保留节点内基因的共表达特征，保护特异性
+      var_null <- var_W * sum(valid_nodes$NS^2)
+      sigma_null <- sqrt(var_null)
 
-      # Calculate p-value based on direction of S_mean
-      if (!is.na(sd(null_mean)) && sd(null_mean) > 0) {
-        if (S_mean >= 0) {
-          p_mean <- (sum(null_mean >= S_mean, na.rm = TRUE) + 1) / (perm + 1)
+      if (!is.na(sigma_null) && sigma_null > 0) {
+        Z_score <- (S_sum - mu_null) / sigma_null
+        # 根据得分方向计算单侧 p 值
+        if (S_sum >= 0) {
+          p_mean <- stats::pnorm(Z_score, lower.tail = FALSE) # 右尾
         } else {
-          p_mean <- (sum(null_mean <= S_mean, na.rm = TRUE) + 1) / (perm + 1)
+          p_mean <- pnorm(Z_score, lower.tail = TRUE) # 左尾
         }
       }
     }
 
-    # --- Step D: Return results ---
     data.frame(
-      Pathway_id = path,
-      K_num = tmp_K_num,
-      Exist_K_num = tmp_exist_K_num,
-      Exist_K = mapped_names_str,
-      S_mean = S_mean,
-      S_sum = S_sum,
-      p_value = p_mean,
-      p_adjust = NA_real_,
-      stringsAsFactors = FALSE
+      Pathway_id = path, K_num = tmp_K_num, Exist_K_num = tmp_exist_K_num,
+      Exist_K = mapped_names_str, S_mean = S_mean, S_sum = S_sum,
+      p_value = p_mean, p_adjust = NA_real_, stringsAsFactors = FALSE
     )
   }
 
-  # Run computation (with optional parallelization)
   if (parallel) {
     pcutils::lib_ps("parallel")
     TWCE_scores_list <- parallel::mclapply(unique_paths, compute_pathway, mc.cores = cores)
@@ -403,55 +372,61 @@ calculate_TWICE <- function(all_NS_res, cor_df,
   }
 
   TWCE_scores <- dplyr::bind_rows(TWCE_scores_list)
+
+  # 独立 FDR 校正，自动剔除 p_value 为 NA 的行
   TWCE_scores$p_adjust <- p.adjust(TWCE_scores$p_value, method = p.adjust.method)
 
   return(TWCE_scores)
 }
 
 
+
+
+#' Internal function for calculating TWiCE scores in 'mixed' mode
+#'
+#' @return Data frame with TWiCE scores for mixed mode
+#' @keywords internal
 #' Internal function for calculating TWiCE scores in 'mixed' mode
 #'
 #' @return Data frame with TWiCE scores for mixed mode
 #' @keywords internal
 .calculate_TWICE_mixed <- function(all_NS_res, cor_df, unique_paths,
                                    p.adjust.method, perm, parallel, cores,
-                                   min_exist_KO, max_exist_KO) {
-  # Declare variable names to avoid R CMD check notes
+                                   min_exist_KO = 5, max_exist_KO = 600) { # 默认设为 5
   name <- Pathway_id <- NS <- W <- cor <- NULL
 
-  # Prepare absolute correlation pool
+  # 1. 自适应稳健修剪方差 (Adaptive Trimmed Variance via IQR)
+  # Mixed 模式取了绝对值 (仅包含正数)，长尾仅在右侧，因此仅修剪上限 (单尾)
   cor_pool_abs <- abs(cor_df$cor)
-  pool_ns <- all_NS_res$NS
 
-  # Main computation function for a single pathway
+  Q1 <- quantile(cor_pool_abs, 0.25, na.rm = TRUE)
+  Q3 <- quantile(cor_pool_abs, 0.75, na.rm = TRUE)
+  IQR_val <- Q3 - Q1
+
+  upper_bound <- Q3 + 1.5 * IQR_val
+
+  # 仅提取低于上限的稳健背景噪音
+  bg_cor <- cor_pool_abs[cor_pool_abs <= upper_bound]
+  mu_W <- mean(bg_cor, na.rm = TRUE)
+  var_W <- var(bg_cor, na.rm = TRUE)
+
   compute_pathway <- function(path) {
-    NS_res <- dplyr::filter(all_NS_res, Pathway_id == path) %>%
-      dplyr::select(name, NS)
+    NS_res <- dplyr::filter(all_NS_res, Pathway_id == path) %>% dplyr::select(name, NS)
     tmp_K_num <- nrow(NS_res)
 
-    # Identify mapped KOs
     path_name_vec <- unique(unlist(strsplit(NS_res$name, " ")))
     cor_name_vec <- unique(cor_df$name[!is.na(cor_df$cor)])
     mapped_names <- intersect(path_name_vec, cor_name_vec)
-    mapped_names_str <- if (length(mapped_names) > 0) {
-      paste(mapped_names, collapse = "|")
-    } else {
-      NA_character_
-    }
+    mapped_names_str <- if (length(mapped_names) > 0) paste(mapped_names, collapse = "|") else NA_character_
 
-    # Step A: Node aggregation (using absolute correlations)
     node_scores <- lapply(seq_len(nrow(NS_res)), function(j) {
-      node_name <- NS_res$name[j]
-      node_ns <- NS_res$NS[j]
-      gene_list <- unlist(strsplit(node_name, " "))
+      gene_list <- unlist(strsplit(NS_res$name[j], " "))
       cor_sub <- cor_df[cor_df$name %in% gene_list, , drop = FALSE]
-
       if (nrow(cor_sub) == 0) {
         return(data.frame(W = NA, NS = NA))
       }
 
-      W <- mean(abs(cor_sub$cor), na.rm = TRUE) # Take absolute values
-      data.frame(W = W, NS = node_ns)
+      data.frame(W = mean(abs(cor_sub$cor), na.rm = TRUE), NS = NS_res$NS[j])
     }) %>%
       dplyr::bind_rows() %>%
       filter(!is.na(W))
@@ -459,39 +434,31 @@ calculate_TWICE <- function(all_NS_res, cor_df,
     tmp_exist_K_num <- nrow(node_scores)
     S_mean <- S_sum <- p_mean <- NA_real_
 
-    # Calculate scores if KO count is within bounds
+    # --- Z-score 参数化检验核心 ---
     if (tmp_exist_K_num >= min_exist_KO & tmp_exist_K_num <= max_exist_KO) {
-      S_mean <- mean(node_scores$W * node_scores$NS, na.rm = TRUE)
-      S_sum <- S_mean * tmp_exist_K_num
+      valid_nodes <- node_scores
+      S_mean <- mean(valid_nodes$W * valid_nodes$NS, na.rm = TRUE)
+      S_sum <- sum(valid_nodes$W * valid_nodes$NS, na.rm = TRUE)
 
-      # Null distribution generation using absolute correlations
-      null_mean <- replicate(perm, {
-        perm_cor <- sample(cor_pool_abs, tmp_exist_K_num, replace = TRUE)
-        perm_ns <- sample(pool_ns, tmp_exist_K_num, replace = TRUE)
-        mean(perm_cor * perm_ns, na.rm = TRUE)
-      })
+      mu_null <- mu_W * sum(valid_nodes$NS)
+      # 同样不除以 k_i，保护特异性
+      var_null <- var_W * sum(valid_nodes$NS^2)
+      sigma_null <- sqrt(var_null)
 
-      # Calculate one-sided p-value
-      if (!is.na(sd(null_mean)) && sd(null_mean) > 0) {
-        p_mean <- (sum(null_mean >= S_mean, na.rm = TRUE) + 1) / (perm + 1)
+      if (!is.na(sigma_null) && sigma_null > 0) {
+        Z_score <- (S_sum - mu_null) / sigma_null
+        # Mixed 模式由于取绝对值，得分必定为正，只计算极高值的概率（右尾）
+        p_mean <- pnorm(Z_score, lower.tail = FALSE)
       }
     }
 
-    # Return results
     data.frame(
-      Pathway_id = path,
-      K_num = tmp_K_num,
-      Exist_K_num = tmp_exist_K_num,
-      Exist_K = mapped_names_str,
-      S_mean = S_mean,
-      S_sum = S_sum,
-      p_value = p_mean,
-      p_adjust = NA_real_,
-      stringsAsFactors = FALSE
+      Pathway_id = path, K_num = tmp_K_num, Exist_K_num = tmp_exist_K_num,
+      Exist_K = mapped_names_str, S_mean = S_mean, S_sum = S_sum,
+      p_value = p_mean, p_adjust = NA_real_, stringsAsFactors = FALSE
     )
   }
 
-  # Run computation (with optional parallelization)
   if (parallel) {
     pcutils::lib_ps("parallel")
     TWCE_scores_list <- parallel::mclapply(unique_paths, compute_pathway, mc.cores = cores)
@@ -500,6 +467,8 @@ calculate_TWICE <- function(all_NS_res, cor_df,
   }
 
   TWCE_scores <- dplyr::bind_rows(TWCE_scores_list)
+
+  # 独立 FDR 校正
   TWCE_scores$p_adjust <- p.adjust(TWCE_scores$p_value, method = p.adjust.method)
 
   return(TWCE_scores)

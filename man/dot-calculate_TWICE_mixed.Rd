@@ -12,14 +12,25 @@
   perm,
   parallel,
   cores,
-  min_exist_KO,
-  max_exist_KO
+  min_exist_KO = 5,
+  max_exist_KO = 600
 )
 }
 \value{
+Data frame with TWiCE scores for mixed mode
+
 Data frame with TWiCE scores for mixed mode
 }
 \description{
 Internal function for calculating TWiCE scores in 'mixed' mode
 }
+\keyword{'mixed'}
+\keyword{Internal}
+\keyword{TWiCE}
+\keyword{calculating}
+\keyword{for}
+\keyword{function}
+\keyword{in}
 \keyword{internal}
+\keyword{mode}
+\keyword{scores}

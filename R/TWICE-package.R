@@ -3,7 +3,7 @@
 
 ## usethis namespace: start
 #' @importFrom utils data head tail download.file untar packageName
-#' @importFrom stats p.adjust reorder cor cor.test rnorm sd var na.omit setNames median quantile
+#' @importFrom stats p.adjust reorder cor cor.test rnorm pnorm sd var na.omit setNames median quantile
 #' @importFrom pcutils lib_ps get_cols strsplit2
 #' @import dplyr
 ## usethis namespace: end
